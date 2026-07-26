@@ -74,10 +74,9 @@ class RMatrix:
         """
         Whether both h tensors are diagonal.
 
-        When they are, an edge of a Reshetikhin--Turaev network carries a
-        single summation index rather than a pair, which makes it cheap to
-        slice: cutting the edge costs one contraction per diagonal entry
-        instead of one per (row, column) pair.
+        When they are, an edge of a Reshetikhin--Turaev network effectively
+        carries a single summation index rather than a pair, since only the
+        terms with equal indices contribute.
         """
         return self._diagonal_h
 

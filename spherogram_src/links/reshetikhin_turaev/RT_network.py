@@ -1,8 +1,3 @@
-from itertools import product as cartesian_product
-
-from .sparse_array import SparseTensor
-
-
 class _ShapeOnly:
     """Stand-in for a tensor when only its shape matters (opt_einsum input)."""
 
@@ -62,8 +57,7 @@ class RTNetwork:
         """
         self.tensors = tensors
 
-        # Whether the edge tensors are diagonal.  Slicing works either way,
-        # but a diagonal h makes it cheapest; see choose_slice_edges.
+        # Whether the edge tensors of this network are diagonal.
         self.diagonal_h = tensors.diagonal_h if tensors is not None else False
 
         if T is not None:
@@ -458,251 +452,25 @@ class RTNetwork:
             (tensor.permute(reshape_indices, consume=True), tuple(desired_order))
         )
 
-    def largest_intermediate(self, cut=()):
-        """
-        Dense size of the largest intermediate tensor an optimal contraction
-        of self would build, ignoring the edges whose indices are in `cut`.
-
-        This is the quantity that determines peak memory, so it is what
-        choose_slice_edges minimises.
-        """
-        try:
-            import opt_einsum as oe
-        except ImportError:
-            raise ModuleNotFoundError(
-                "Module opt_einsum is required for computing the optimal contraction sequences"
-            )
-
-        cut = set(cut)
-        oe_network = []
-        idle = set(self.idle_labels)
-        for tensor, key in self.network:
-            if len(key) == 2 and key[0].index == key[1].index:
-                idle.discard(key[0].index)
-                continue
-            shape = tensor.shape if tensor is not None else tuple(8 for _ in key)
-            oe_network.append(
-                _ShapeOnly(
-                    tuple(s for s, e in zip(shape, key) if e.index not in cut)
-                )
-            )
-            oe_network.append([e.index for e in key if e.index not in cut])
-
-        _, info = oe.contract_path(*oe_network, sorted(idle - cut))
-        return int(info.largest_intermediate)
-
-    def _slice_candidates(self):
-        """Indices of the internal edges of self, which are the sliceable ones."""
-        counts = {}
-        for _, key in self.network:
-            for e in key:
-                counts[e.index] = counts.get(e.index, 0) + 1
-        return sorted(
-            index
-            for index, count in counts.items()
-            if count == 2 and index not in self.idle_labels
-        )
-
-    def _slice_count(self, index):
-        """How many slices cutting the edge `index` costs: the nonzero entries
-        of its edge tensor."""
-        return len(self.tensors.h_ref(self.rot_num[index]))
-
-    def choose_slice_edges(self, max_edges=2, min_factor=None, min_size=10**4):
-        """
-        Greedily choose edges to slice, or [] when slicing is not worth it.
-
-        Cutting an edge divides the peak memory by roughly the factor by which
-        it shrinks the largest intermediate, and multiplies the number of
-        contractions by the number of slices it costs -- the nonzero entries
-        of its edge tensor, which is the dimension when h is diagonal and up
-        to its square when it is not.  So an edge is accepted only when
-        cutting it divides the largest intermediate by at least that many,
-        i.e. when it at least breaks even.  Slicing an edge that does not
-        reduce the width costs a large multiple of the time for almost no
-        memory, which is why the default is to refuse rather than to slice
-        something.
-
-        max_edges: most edges to cut.
-        min_factor: override the break-even factor for every candidate.
-        min_size: never slice a contraction whose largest intermediate is
-                already below this, where the overhead would dominate.
-        """
-        if self.tensors is None:
-            return []
-
-        candidates = self._slice_candidates()
-        if not candidates:
-            return []
-
-        current = self.largest_intermediate()
-        if current < min_size:
-            return []
-
-        chosen = []
-        while len(chosen) < max_edges and candidates:
-            best, best_size = None, None
-            for candidate in candidates:
-                size = self.largest_intermediate(chosen + [candidate])
-                factor = (
-                    min_factor if min_factor is not None
-                    else self._slice_count(candidate)
-                )
-                if size * factor > current:
-                    # Cutting this edge costs more contractions than the
-                    # memory it saves is worth.
-                    continue
-                if best_size is None or size < best_size:
-                    best, best_size = candidate, size
-            if best is None:
-                break
-            chosen.append(best)
-            candidates.remove(best)
-            current = best_size
-            if current < min_size:
-                break
-        return chosen
-
-    def _contract_all_sliced(self, slice_edges):
-        """
-        Contract self by cutting `slice_edges` and summing over their values.
-
-        A cut edge joins a positively signed leg to a negatively signed one
-        through its edge tensor h, contributing sum_{i,j} h[i,j] * (...) with
-        i the value at the positive end and j the value at the negative end.
-        Pinning those two ends to a fixed (i, j) and contracting the smaller
-        network that remains, then summing the results weighted by h[i,j],
-        gives the same answer while every intermediate carries one axis less.
-
-        The slices run over the nonzero entries of h, so a cut costs as many
-        contractions as h has entries: the dimension when h is diagonal (the
-        two ends then always take the same value), up to its square when not.
-        """
-        # For each cut edge: its two legs with the value each takes, and its
-        # edge tensor.
-        sites = []
-        for index in slice_edges:
-            legs = [
-                (node_pos, axis_pos, e.sign)
-                for node_pos, (_, key) in enumerate(self.network)
-                for axis_pos, e in enumerate(key)
-                if e.index == index
-            ]
-            assert len(legs) == 2, f"edge {index} does not join exactly two legs"
-            assert (
-                legs[0][2] * legs[1][2] == -1
-            ), f"edge {index} does not join opposite ends"
-            sites.append((legs, self.tensors.h_ref(self.rot_num[index])))
-
-        accumulator = None
-        result_key = None
-        seq = None
-
-        for combination in cartesian_product(*[sorted(h.keys()) for _, h in sites]):
-            weight = 1
-            fixings = {}
-            for (i, j), (legs, h) in zip(combination, sites):
-                weight = weight * h[i, j]
-                for node_pos, axis_pos, sign in legs:
-                    # h[i,j] pairs the positive end's value with the negative
-                    # end's; they coincide exactly when h is diagonal.
-                    fixings.setdefault(node_pos, []).append(
-                        (axis_pos, i if sign == 1 else j)
-                    )
-
-            sliced = []
-            for node_pos, (tensor, key) in enumerate(self.network):
-                fix = fixings.get(node_pos)
-                if fix:
-                    new_key = list(key)
-                    for axis_pos, value in sorted(fix, reverse=True):
-                        tensor = tensor.fixate(axis_pos, value)
-                        new_key.pop(axis_pos)
-                    sliced.append((tensor, tuple(new_key)))
-                else:
-                    # Every slice reads these, so hand out a private copy the
-                    # contraction is free to consume.
-                    sliced.append((tensor.copy(), key))
-
-            slice_network = RTNetwork(
-                self.tensors,
-                network=sliced,
-                rot_num=self.rot_num,
-                boundary=self.boundary,
-                boundary_labels=self.boundary_labels,
-            )
-            slice_network._resolve_self_loops()
-            # Every slice has the same index structure, so the contraction
-            # sequence found for the first one serves for all of them.
-            if seq is None or len(seq) != len(slice_network.network) - 1:
-                seq = slice_network.optimal_contraction_sequence()
-            slice_network.contract_sequence(seq)
-            assert len(slice_network.network) == 1
-            slice_network._reorder_boundary()
-
-            tensor, result_key = slice_network.network[0]
-            if accumulator is None:
-                accumulator = SparseTensor(tensor.shape, default=tensor.default)
-            # value * weight is a fresh object in every case, so the
-            # accumulator may absorb it.
-            for key, value in tensor.items():
-                accumulator._accumulate_owned(key, value * weight)
-
-        if accumulator is None:
-            # No edge value contributed, which needs an h tensor that is
-            # identically zero.  Fall back rather than guess the result shape.
-            return self._contract_all_direct()
-
-        self.network = [(accumulator, result_key)]
-
-    def contract_all(self, timed=False, slice_edges=None, **slice_options):
+    def contract_all(self, timed=False):
         """
         Perform all possible contractions on self.
 
         Return modified self and time (None if not timed).
-
-        The contraction is sliced when that is worth it: some edges are cut
-        and summed over separately, which keeps every intermediate smaller.
-        Slicing works for any edge tensors, but is cheapest with diagonal h
-        (see RMatrix.diagonal_h), where a cut costs one contraction per
-        dimension rather than one per nonzero entry of h.  Pass slice_edges to
-        choose the edges yourself, slice_edges=[] to force the plain
-        contraction, or keyword arguments for choose_slice_edges to tune the
-        selection.
         """
-        if timed:
-            import time
-
-            start_time = time.time()
-
         self._resolve_self_loops()
+        time = self.contract_sequence(self.optimal_contraction_sequence(), timed=timed)
 
-        if slice_edges is None:
-            slice_edges = self.choose_slice_edges(**slice_options)
-        elif slice_options:
-            raise ValueError("slice options are only used when choosing slice_edges")
-
-        if slice_edges:
-            self._contract_all_sliced(slice_edges)
-        else:
-            self._contract_all_direct()
-
-        return (self, time.time() - start_time if timed else None)
-
-    def _contract_all_direct(self):
-        """Contract self in one pass, without slicing."""
-        self.contract_sequence(self.optimal_contraction_sequence())
         assert len(self.network) == 1
+
         self._reorder_boundary()
 
-    def evaluate(self, timed=False, slice_edges=None, **slice_options):
+        return (self, time)
+
+    def evaluate(self, timed=False):
         """
         Fixate all idle labels at value 0, obtaining a new RTNework with (0,0) boundary (without modifying self),
         contract_all on the new RTNetwork and return the product of all values of the resulting tensors.
-
-        slice_edges and any further keyword arguments are passed on to
-        contract_all, which slices the contraction when the tensors have
-        diagonal h.
         """
         assert self.boundary == (1, 1)
 
@@ -730,9 +498,7 @@ class RTNetwork:
             boundary=(0, 0),
             boundary_labels=[],
         )
-        time = reduced.contract_all(
-            timed=timed, slice_edges=slice_edges, **slice_options
-        )[1]
+        time = reduced.contract_all(timed=timed)[1]
 
         result = prefactor
         for tensor, _ in reduced.network:
