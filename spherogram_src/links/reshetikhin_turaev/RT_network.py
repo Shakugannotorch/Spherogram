@@ -107,6 +107,7 @@ class RTNetwork:
                             tensor = tensor.decorated_contract(
                                 tensors.h_ref(0),
                                 {(i, 1): (1, tensors.h_ref(self.rot_num[e.index]))},
+                                diagonal=self.diagonal_h,
                             )
                             tensor = tensor.permute(perm)
 
@@ -356,8 +357,12 @@ class RTNetwork:
 
         if tensor1 is not None:
             # Both operands leave the network below, so let the contraction
-            # cannibalise whichever one it streams.
-            result_tensor = tensor1.decorated_contract(tensor2, pairs, consume=True)
+            # cannibalise whichever one it streams.  Whether the decorations
+            # are diagonal is a property of the R matrices, so it is settled
+            # once for the network rather than examined at every contraction.
+            result_tensor = tensor1.decorated_contract(
+                tensor2, pairs, consume=True, diagonal=self.diagonal_h
+            )
         else:
             result_tensor = None
 
