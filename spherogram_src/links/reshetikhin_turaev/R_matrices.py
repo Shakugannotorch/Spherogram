@@ -59,7 +59,7 @@ def laurent_sparse_tensor_from_path(
 
 
 class RMatrix:
-    __slots__ = ["_R", "_h", "_id"]
+    __slots__ = ["_R", "_h", "_id", "_diagonal_h"]
 
     def __init__(self, Rp, Rm, hp, hm):
         self._R = (Rp, Rm)
@@ -67,7 +67,22 @@ class RMatrix:
 
         self._id = SparseTensor(hp.shape, data={(i, i): 1 for i in range(hp.shape[0])})
 
+        self._diagonal_h = all(i == j for h in (hp, hm) for i, j in h.keys())
+
+    @property
+    def diagonal_h(self):
+        """
+        Whether both h tensors are diagonal.
+
+        When they are, an edge of a Reshetikhin--Turaev network carries a
+        single summation index rather than a pair, which makes it cheap to
+        slice: cutting the edge costs one contraction per diagonal entry
+        instead of one per (row, column) pair.
+        """
+        return self._diagonal_h
+
     def R(self, sign):
+        """A private copy of the R tensor for `sign`, safe to modify or consume."""
         if sign == 1:
             return self._R[0].copy()
         else:
@@ -75,10 +90,21 @@ class RMatrix:
             return self._R[1].copy()
 
     def h(self, sign):
+        """A private copy of the h tensor for `sign`, safe to modify or consume."""
+        return self.h_ref(sign).copy()
+
+    def h_ref(self, sign):
+        """
+        The shared h tensor for `sign`.
+
+        Read-only: callers must not modify it, place it in a network that
+        will consume it, or pass it as a consumable contraction operand.
+        Use h() for that.
+        """
         if sign == 1:
-            return self._h[0].copy()
+            return self._h[0]
         elif sign == -1:
-            return self._h[1].copy()
+            return self._h[1]
         else:
             assert sign == 0
             return self._id

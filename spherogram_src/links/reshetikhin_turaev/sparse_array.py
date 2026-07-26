@@ -155,6 +155,48 @@ class SparseTensor(SparseArray):
         else:
             self._data[key] = value
 
+    def _accumulate_owned(self, key, value):
+        """
+        Add value into self[key], absorbing value's coefficients in place.
+
+        Only for values this tensor owns: value must have been freshly created
+        by the caller and must not be shared with any other tensor, since the
+        entry it is merged into is mutated rather than rebuilt.  This avoids
+        the copy of the whole accumulated polynomial that `x = x + value`
+        performs on every hit, which is quadratic in the number of hits.
+
+        Values that are not dict-based polynomials, and polynomials whose
+        variables differ, fall back to ordinary addition.
+        """
+        data = self._data
+        current = data.get(key)
+        if current is None:
+            data[key] = value
+            return
+
+        current_dict = getattr(current, "poly_dict", None)
+        value_dict = getattr(value, "poly_dict", None)
+        if current_dict is None or value_dict is None or current.vars is not value.vars:
+            result = current + value
+            if result:
+                data[key] = result
+            else:
+                del data[key]
+            return
+
+        for exponent, coefficient in value_dict.items():
+            previous = current_dict.get(exponent)
+            if previous is None:
+                current_dict[exponent] = coefficient
+            else:
+                total = previous + coefficient
+                if total:
+                    current_dict[exponent] = total
+                else:
+                    del current_dict[exponent]
+        if not current_dict:
+            del data[key]
+
     def contract(self, other: "SparseTensor", pairs):
         """
         Contract self with other over the specified index pairs, returning a
@@ -212,7 +254,7 @@ class SparseTensor(SparseArray):
                 result._accumulate(f_key_a + f_key_b, val_a * val_b)
         return result
 
-    def decorated_contract(self, other: "SparseTensor", pairs):
+    def decorated_contract(self, other: "SparseTensor", pairs, consume=False):
         """
         An enhanced version of contract, where:
 
@@ -224,6 +266,13 @@ class SparseTensor(SparseArray):
             A.contract(B, {(1,0): (0, h)}) gives C[i,l]:= sum_{j,k} A[i,j] * h[j,k] * B[k,l]
             and
             A.contract(B, {(1,0): (1, h)}) gives C[i,l]:= sum_{j,k} A[i,j] * h[k,j] * B[k,l]
+
+        consume: when True, the entries of whichever operand is streamed are
+                freed as they are used, leaving that operand empty on return.
+                Peak memory is then the resident operand plus the result,
+                instead of both operands plus the result.  Only pass True when
+                both operands are about to be discarded, and never for a
+                tensor shared with anything else (an RMatrix's h tensors, say).
         """
         if self is other:
             return self._decorated_trace_pairs(pairs)
@@ -253,36 +302,68 @@ class SparseTensor(SparseArray):
         if not self._data or not other._data:
             return SparseTensor(result_shape, default=self._default)
 
-        # Group self entries by their contracted-axis values (in pair_list order).
-        self_groups = {}
-        for key, val in self._data.items():
-            c_key = tuple(key[ai] for ai, _ in pair_list)
-            f_key = tuple(key[i] for i in self_free)
-            self_groups.setdefault(c_key, []).append((f_key, val))
+        # Every entry of the grouped operand is revisited once per matching
+        # entry of the streamed one, so the grouped operand has to stay
+        # resident for the whole pass while the streamed one is touched a
+        # single entry at a time.  Group whichever side is smaller.
+        stream_self = len(self._data) > len(other._data)
+        if stream_self:
+            grouped, streamed = other, self
+            grouped_axes = [bj for _, bj in pair_list]
+            streamed_axes = [ai for ai, _ in pair_list]
+            grouped_free, streamed_free = other_free, self_free
+            # `side` says which axis of h meets self; the roles just swapped.
+            grouped_sides = [1 - pairs[p][0] for p in pair_list]
+        else:
+            grouped, streamed = self, other
+            grouped_axes = [ai for ai, _ in pair_list]
+            streamed_axes = [bj for _, bj in pair_list]
+            grouped_free, streamed_free = self_free, other_free
+            grouped_sides = [pairs[p][0] for p in pair_list]
 
-        # For each pair m, precompute: given k (other's contracted value),
-        # which j values in self are reachable and with what h weight?
-        # h_lookup[m][k] = [(j, h_val), ...]
+        # Group entries of the resident operand by their contracted-axis values.
+        groups = {}
+        for key, val in grouped._data.items():
+            c_key = tuple(key[ax] for ax in grouped_axes)
+            f_key = tuple(key[i] for i in grouped_free)
+            groups.setdefault(c_key, []).append((f_key, val))
+
+        # For each pair m, precompute: given k (the streamed operand's
+        # contracted value), which values j of the grouped operand are
+        # reachable and with what h weight?  h_lookup[m][k] = [(j, h_val), ...]
         h_lookups = []
-        for ai, bj in pair_list:
-            side, h = pairs[(ai, bj)]
+        for m, p in enumerate(pair_list):
+            h = pairs[p][1]
             lookup = {}
             for hkey, hval in h._data.items():
                 hi, hj = hkey
-                j, k = (hi, hj) if side == 0 else (hj, hi)
+                j, k = (hi, hj) if grouped_sides[m] == 0 else (hj, hi)
                 lookup.setdefault(k, []).append((j, hval))
             h_lookups.append(lookup)
 
         result = SparseTensor(result_shape, default=self._default)
+        accumulate = result._accumulate_owned
+        grouped_first = not stream_self
+        streamed_data = streamed._data
 
-        for key_b, val_b in other._data.items():
-            f_key_b = tuple(key_b[i] for i in other_free)
+        if consume:
+
+            def streamed_entries():
+                while streamed_data:
+                    yield streamed_data.popitem()
+
+        else:
+
+            def streamed_entries():
+                return iter(streamed_data.items())
+
+        for key_b, val_b in streamed_entries():
+            f_key_b = tuple(key_b[i] for i in streamed_free)
 
             # For each pair m, collect reachable (j_m, h_val_m) from h_m.
             per_pair = []
-            for m, (ai, bj) in enumerate(pair_list):
-                k = key_b[bj]
-                js = h_lookups[m].get(k)
+            for m, ax in enumerate(streamed_axes):
+                js = h_lookups[m].get(key_b[ax])
                 if not js:
                     break
                 per_pair.append(js)
@@ -290,15 +371,20 @@ class SparseTensor(SparseArray):
                 # Cartesian product: try every combination of j values across pairs.
                 for combo in cartesian_product(*per_pair):
                     c_key = tuple(j for j, _ in combo)
-                    group = self_groups.get(c_key)
+                    group = groups.get(c_key)
                     if group is None:
                         continue
                     h_weight = 1
                     for _, hval in combo:
                         h_weight *= hval
                     hval_b = h_weight * val_b
-                    for f_key_a, val_a in group:
-                        result._accumulate(f_key_a + f_key_b, val_a * hval_b)
+                    if grouped_first:
+                        for f_key_a, val_a in group:
+                            accumulate(f_key_a + f_key_b, val_a * hval_b)
+                    else:
+                        for f_key_a, val_a in group:
+                            accumulate(f_key_b + f_key_a, val_a * hval_b)
+            del key_b, val_b
 
         return result
 
@@ -409,7 +495,7 @@ class SparseTensor(SparseArray):
             result._data[free_key] = val
         return result
 
-    def permute(self, indices):
+    def permute(self, indices, consume=False):
         """
         Reorder axes using pull-style indices: indices[i] is the axis of self
         that becomes axis i of the result.
@@ -417,10 +503,20 @@ class SparseTensor(SparseArray):
         result[i0, i1, ...] = self[i_{indices[0]}, i_{indices[1]}, ...]
 
         Example: A.permute([2, 0, 1]) produces B where B[a,b,c] = A[b,c,a].
+
+        consume: when True, entries are moved out of self as the result is
+                built, so the two never both hold the full tensor.  Self is
+                left empty.
         """
         result_shape = [self._shape[i] for i in indices]
         result = SparseTensor(result_shape, default=self._default)
-        for key, val in self._data.items():
-            new_key = tuple(key[i] for i in indices)
-            result._data[new_key] = val
+        if consume:
+            data = self._data
+            while data:
+                key, val = data.popitem()
+                result._data[tuple(key[i] for i in indices)] = val
+        else:
+            for key, val in self._data.items():
+                new_key = tuple(key[i] for i in indices)
+                result._data[new_key] = val
         return result

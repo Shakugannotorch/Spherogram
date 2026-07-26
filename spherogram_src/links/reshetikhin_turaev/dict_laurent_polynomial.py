@@ -82,6 +82,24 @@ def _intern_vars(vars_tuple):
     return _vars_cache.setdefault(vars_tuple, vars_tuple)
 
 
+# Exponent tuples are created afresh by every multiplication but take very few
+# distinct values: contracting a Reshetikhin--Turaev network can hold millions
+# of terms spread over a few hundred distinct exponent vectors.  Interning them
+# keeps one tuple object per value, which is the largest single component of
+# the memory a contraction uses.  The cache is bounded by the range of degrees
+# a computation reaches; the limit is a backstop for long-lived sessions.
+_exp_cache = {}
+
+_EXP_CACHE_LIMIT = 1 << 20
+
+
+def _intern_exponent(key):
+    """Return the canonical tuple object equal to the exponent tuple `key`."""
+    if len(_exp_cache) > _EXP_CACHE_LIMIT:
+        _exp_cache.clear()
+    return _exp_cache.setdefault(key, key)
+
+
 class FastDictLaurentPolynomial:
     """
     A sparse Laurent polynomial in arbitrarily many variables.
@@ -371,32 +389,43 @@ class FastDictLaurentPolynomial:
         """
         if isinstance(other, FastDictLaurentPolynomial):
             result = {}
+            # Share one tuple object per distinct exponent vector: the tuples
+            # built below are overwhelmingly duplicates of ones already alive.
+            if len(_exp_cache) > _EXP_CACHE_LIMIT:
+                _exp_cache.clear()
+            intern = _exp_cache.setdefault
             if len(self.poly_dict) == 1:
                 # monomial * polynomial: no cancellation possible, assign directly
                 ((k1, v1),) = self.poly_dict.items()
                 n = len(k1)
                 if n == 1:
                     for k2, v2 in other.poly_dict.items():
-                        result[(k1[0] + k2[0],)] = v1 * v2
+                        k = (k1[0] + k2[0],)
+                        result[intern(k, k)] = v1 * v2
                 elif n == 2:
                     for k2, v2 in other.poly_dict.items():
-                        result[(k1[0] + k2[0], k1[1] + k2[1])] = v1 * v2
+                        k = (k1[0] + k2[0], k1[1] + k2[1])
+                        result[intern(k, k)] = v1 * v2
                 else:
                     for k2, v2 in other.poly_dict.items():
-                        result[tuple(a + b for a, b in zip(k1, k2))] = v1 * v2
+                        k = tuple(a + b for a, b in zip(k1, k2))
+                        result[intern(k, k)] = v1 * v2
             elif len(other.poly_dict) == 1:
                 # polynomial * monomial: no cancellation possible, assign directly
                 ((k2, v2),) = other.poly_dict.items()
                 n = len(k2)
                 if n == 1:
                     for k1, v1 in self.poly_dict.items():
-                        result[(k1[0] + k2[0],)] = v1 * v2
+                        k = (k1[0] + k2[0],)
+                        result[intern(k, k)] = v1 * v2
                 elif n == 2:
                     for k1, v1 in self.poly_dict.items():
-                        result[(k1[0] + k2[0], k1[1] + k2[1])] = v1 * v2
+                        k = (k1[0] + k2[0], k1[1] + k2[1])
+                        result[intern(k, k)] = v1 * v2
                 else:
                     for k1, v1 in self.poly_dict.items():
-                        result[tuple(a + b for a, b in zip(k1, k2))] = v1 * v2
+                        k = tuple(a + b for a, b in zip(k1, k2))
+                        result[intern(k, k)] = v1 * v2
             else:
                 n = len(self.vars)
                 if n == 1:
@@ -404,40 +433,43 @@ class FastDictLaurentPolynomial:
                         for k2, v2 in other.poly_dict.items():
                             k = (k1[0] + k2[0],)
                             prod = v1 * v2
-                            if k in result:
-                                s = result[k] + prod
+                            old = result.get(k)
+                            if old is None:
+                                result[intern(k, k)] = prod
+                            else:
+                                s = old + prod
                                 if s:
                                     result[k] = s
                                 else:
                                     del result[k]
-                            else:
-                                result[k] = prod
                 elif n == 2:
                     for k1, v1 in self.poly_dict.items():
                         for k2, v2 in other.poly_dict.items():
                             k = (k1[0] + k2[0], k1[1] + k2[1])
                             prod = v1 * v2
-                            if k in result:
-                                s = result[k] + prod
+                            old = result.get(k)
+                            if old is None:
+                                result[intern(k, k)] = prod
+                            else:
+                                s = old + prod
                                 if s:
                                     result[k] = s
                                 else:
                                     del result[k]
-                            else:
-                                result[k] = prod
                 else:
                     for k1, v1 in self.poly_dict.items():
                         for k2, v2 in other.poly_dict.items():
                             k = tuple(a + b for a, b in zip(k1, k2))
                             prod = v1 * v2
-                            if k in result:
-                                s = result[k] + prod
+                            old = result.get(k)
+                            if old is None:
+                                result[intern(k, k)] = prod
+                            else:
+                                s = old + prod
                                 if s:
                                     result[k] = s
                                 else:
                                     del result[k]
-                            else:
-                                result[k] = prod
             return FastDictLaurentPolynomial._make(self.vars, result, _interned=True)
 
         if self == 0 or other == 0:
@@ -568,7 +600,7 @@ class FastDictLaurentPolynomial:
                 )
             scales.append(new_var.denominator // old_var.denominator)
         new_poly_dict = {
-            tuple(k * s for k, s in zip(key, scales)): coef
+            _intern_exponent(tuple(k * s for k, s in zip(key, scales))): coef
             for key, coef in self.poly_dict.items()
         }
         return FastDictLaurentPolynomial._make(new_vars, new_poly_dict)
