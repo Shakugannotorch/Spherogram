@@ -75,6 +75,68 @@ def _gcd(a, b):
     return a
 
 
+def _lcm(a, b):
+    return a * b // _gcd(a, b)
+
+
+def _union_vars(vars1, vars2):
+    """Return a variable tuple covering both vars1 and vars2.
+
+    Variables are identified by name, so the two tuples may list a shared
+    variable at different positions; a name occurring in both gets the LCM of
+    the two denominators.  The result is symmetric in its arguments: the shared
+    order is kept when both tuples list the same names in the same order, and
+    the union is sorted by name otherwise.  Symmetry is what makes ``a + b``
+    and ``b + a`` (or ``a * b`` and ``b * a``) land on the same variable tuple.
+
+    >>> q2, t = LaurentVariable('q', 2), LaurentVariable('t')
+    >>> _union_vars((t, LaurentVariable('q')), (q2, t))
+    (q[1/2], t)
+    """
+    by_name1 = {v.name: v for v in vars1}
+    by_name2 = {v.name: v for v in vars2}
+    if [v.name for v in vars1] == [v.name for v in vars2]:
+        names = [v.name for v in vars1]
+    else:
+        names = sorted(by_name1.keys() | by_name2.keys())
+    union = []
+    for name in names:
+        v1, v2 = by_name1.get(name), by_name2.get(name)
+        if v1 is None:
+            union.append(v2)
+        elif v2 is None:
+            union.append(v1)
+        else:
+            union.append(LaurentVariable(name, _lcm(v1.denominator, v2.denominator)))
+    return _intern_vars(tuple(union))
+
+
+def _expand_dict_to(poly, target_vars):
+    """Return poly's poly_dict re-expressed over target_vars.
+
+    target_vars must contain every variable name used by poly, in any order,
+    each with a denominator that is a multiple of poly's.  Exponent keys are
+    permuted into the target order and scaled by new_denom / old_denom;
+    variables of target_vars that poly does not use get exponent 0.
+    """
+    old_vars = poly.vars
+    name_to_old = {v.name: i for i, v in enumerate(old_vars)}
+    # slots[j] = (index in old_vars, exponent scale) or None for a new variable.
+    slots = []
+    for tv in target_vars:
+        oi = name_to_old.get(tv.name)
+        if oi is None:
+            slots.append(None)
+        else:
+            slots.append((oi, tv.denominator // old_vars[oi].denominator))
+    return {
+        _intern_exponent(
+            tuple(0 if s is None else key[s[0]] * s[1] for s in slots)
+        ): coeff
+        for key, coeff in poly.poly_dict.items()
+    }
+
+
 _vars_cache = {}
 
 
@@ -267,25 +329,20 @@ class FastDictLaurentPolynomial:
         >>> p4 = DictLaurentPolynomial._make((v4,), {(4,): 1})
         >>> p4 == DictLaurentPolynomial.from_str('q', ['q'])
         True
+        >>> qt = DictLaurentPolynomial.from_str('q^2*t - 1', ['q', 't'])
+        >>> qt == DictLaurentPolynomial.from_str('t*q^2 - 1', ['t', 'q'])
+        True
+        >>> qt == DictLaurentPolynomial.from_str('q^2*s - 1', ['q', 's'])
+        False
         """
         if isinstance(other, FastDictLaurentPolynomial):
             if self.vars is other.vars:
                 return self.poly_dict == other.poly_dict
-            if len(self.vars) != len(other.vars):
+            if {v.name for v in self.vars} != {v.name for v in other.vars}:
                 return False
-            if any(v1.name != v2.name for v1, v2 in zip(self.vars, other.vars)):
-                return False
-
-            def lcm(a, b):
-                return a * b // _gcd(a, b)
-
-            common_vars = tuple(
-                LaurentVariable(v1.name, lcm(v1.denominator, v2.denominator))
-                for v1, v2 in zip(self.vars, other.vars)
-            )
-            return (
-                self.refactor_variables(common_vars).poly_dict
-                == other.refactor_variables(common_vars).poly_dict
+            common_vars = _union_vars(self.vars, other.vars)
+            return _expand_dict_to(self, common_vars) == _expand_dict_to(
+                other, common_vars
             )
         if other == 0:
             return not self.poly_dict
@@ -304,7 +361,7 @@ class FastDictLaurentPolynomial:
         >>> -p
         -2 - q
         """
-        return FastDictLaurentPolynomial._make(
+        return type(self)._make(
             self.vars, {k: -v for k, v in self.poly_dict.items()}, _interned=True
         )
 
@@ -333,12 +390,10 @@ class FastDictLaurentPolynomial:
                         del result[k]
                 else:
                     result[k] = v
-            return FastDictLaurentPolynomial._make(self.vars, result, _interned=True)
+            return type(self)._make(self.vars, result, _interned=True)
 
         if other == 0:
-            return FastDictLaurentPolynomial._make(
-                self.vars, dict(self.poly_dict), _interned=True
-            )
+            return type(self)._make(self.vars, dict(self.poly_dict), _interned=True)
 
         zero_key = (0,) * len(self.vars)
         result = dict(self.poly_dict)
@@ -347,7 +402,7 @@ class FastDictLaurentPolynomial:
             result[zero_key] = s
         else:
             result.pop(zero_key, None)
-        return FastDictLaurentPolynomial._make(self.vars, result, _interned=True)
+        return type(self)._make(self.vars, result, _interned=True)
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -372,7 +427,7 @@ class FastDictLaurentPolynomial:
                         del result[k]
                 else:
                     result[k] = -v
-            return FastDictLaurentPolynomial._make(self.vars, result, _interned=True)
+            return type(self)._make(self.vars, result, _interned=True)
         return self.__add__(-other)
 
     def __rsub__(self, other):
@@ -470,17 +525,15 @@ class FastDictLaurentPolynomial:
                                     result[k] = s
                                 else:
                                     del result[k]
-            return FastDictLaurentPolynomial._make(self.vars, result, _interned=True)
+            return type(self)._make(self.vars, result, _interned=True)
 
         if self == 0 or other == 0:
-            return FastDictLaurentPolynomial._make(self.vars, {}, _interned=True)
+            return type(self)._make(self.vars, {}, _interned=True)
 
         if other == 1:
-            return FastDictLaurentPolynomial._make(
-                self.vars, dict(self.poly_dict), _interned=True
-            )
+            return type(self)._make(self.vars, dict(self.poly_dict), _interned=True)
 
-        return FastDictLaurentPolynomial._make(
+        return type(self)._make(
             self.vars, {k: v * other for k, v in self.poly_dict.items()}, _interned=True
         )
 
@@ -559,7 +612,7 @@ class FastDictLaurentPolynomial:
             tuple(k // r for k, r in zip(key, reductions)): coef
             for key, coef in self.poly_dict.items()
         }
-        return FastDictLaurentPolynomial._make(new_vars, new_poly_dict)
+        return type(self)._make(new_vars, new_poly_dict)
 
     def refactor_variables(self, new_vars):
         """
@@ -603,7 +656,7 @@ class FastDictLaurentPolynomial:
             _intern_exponent(tuple(k * s for k, s in zip(key, scales))): coef
             for key, coef in self.poly_dict.items()
         }
-        return FastDictLaurentPolynomial._make(new_vars, new_poly_dict)
+        return type(self)._make(new_vars, new_poly_dict)
 
     def change_vars(self, rules, new_var_names=None):
         """
@@ -680,7 +733,7 @@ class FastDictLaurentPolynomial:
             parsed_rules = {}
             for src_var, img in rules.items():
                 if isinstance(img, str):
-                    parsed = FastDictLaurentPolynomial.from_str(img, var_names)
+                    parsed = type(self).from_str(img, var_names)
                     d = src_var.denominator
                     if d > 1:
                         # String describes image of the full variable (src_var^1).
@@ -696,9 +749,7 @@ class FastDictLaurentPolynomial:
                             LaurentVariable(v.name, v.denominator * d)
                             for v in parsed.vars
                         )
-                        parsed = FastDictLaurentPolynomial._make(
-                            new_img_vars, parsed.poly_dict
-                        )
+                        parsed = type(self)._make(new_img_vars, parsed.poly_dict)
                     parsed_rules[src_var] = parsed
                 else:
                     parsed_rules[src_var] = img
@@ -710,9 +761,7 @@ class FastDictLaurentPolynomial:
             if var in rules:
                 full_rules[var] = rules[var]
             else:
-                full_rules[var] = FastDictLaurentPolynomial.generator(
-                    self.vars, index=i
-                )
+                full_rules[var] = type(self).generator(self.vars, index=i)
 
         # Unify all image DLPs to a common vars tuple when string values were used.
         if has_str_values and full_rules:
@@ -745,7 +794,7 @@ class FastDictLaurentPolynomial:
 
             if term is None:
                 zero_key = (0,) * len(next(iter(full_rules.values())).vars)
-                term = FastDictLaurentPolynomial._make(
+                term = type(self)._make(
                     next(iter(full_rules.values())).vars, {zero_key: coef}
                 )
             else:
@@ -755,7 +804,7 @@ class FastDictLaurentPolynomial:
 
         if result is None:
             img = next(iter(full_rules.values()))
-            return FastDictLaurentPolynomial._make(img.vars, {})
+            return type(self)._make(img.vars, {})
         return result
 
     @classmethod
@@ -1008,9 +1057,7 @@ class FastDictLaurentPolynomial:
             raise ValueError(f"exponent must be an integer, got {n!r}")
         if n == 0:
             zero_key = (0,) * len(self.vars)
-            return FastDictLaurentPolynomial._make(
-                self.vars, {zero_key: 1}, _interned=True
-            )
+            return type(self)._make(self.vars, {zero_key: 1}, _interned=True)
         if n < 0:
             if len(self.poly_dict) != 1:
                 raise ValueError("negative powers only supported for monomials")
@@ -1021,9 +1068,7 @@ class FastDictLaurentPolynomial:
                 )
             inv_key = tuple(k * n for k in key)
             inv_coef = coef ** (-n)  # -n > 0, so int**int stays int; (±1)^k = (±1)^{-k}
-            return FastDictLaurentPolynomial._make(
-                self.vars, {inv_key: inv_coef}, _interned=True
-            )
+            return type(self)._make(self.vars, {inv_key: inv_coef}, _interned=True)
         result = self
         base = self
         n -= 1
@@ -1073,7 +1118,8 @@ class DictLaurentPolynomial(FastDictLaurentPolynomial):
     """
     A checked variant of FastDictLaurentPolynomial that normalises denominators
     to their LCM and expands to the union of variable sets before each binary
-    arithmetic operation.
+    arithmetic operation.  Variables are matched by name, so operands may list
+    the same variables in different orders.
 
     >>> a = DictLaurentPolynomial.from_str('q^2', ['q'])
     >>> b = DictLaurentPolynomial.from_str('q^(1/2)', ['q'])
@@ -1082,58 +1128,45 @@ class DictLaurentPolynomial(FastDictLaurentPolynomial):
     >>> t = DictLaurentPolynomial.from_str('t', ['t'])
     >>> a + t
     q^2 + t
+    >>> a + DictLaurentPolynomial.from_str('t*q^-2', ['t', 'q'])
+    q^2 + q^-2*t
     """
 
     def _match(self, other):
         """Return (self, other) refactored to share a common vars tuple.
 
-        If the variable sets differ, both are expanded to their union (self's
-        variable order first, then other's exclusive variables appended).
-        Denominators for shared variables are normalised to their LCM.
+        Variables are matched by name, so the two operands may list a shared
+        variable at different positions.  If the variable sets differ, both are
+        expanded to their union; denominators for shared variables are
+        normalised to their LCM.  The common tuple is chosen symmetrically (see
+        :func:`_union_vars`), so ``a op b`` and ``b op a`` produce results over
+        the same variables rather than two transposed representations.
+
+        >>> a = DictLaurentPolynomial.from_str('q^2*t + 1', ['q', 't'])
+        >>> b = DictLaurentPolynomial.from_str('t^3*q - 2', ['t', 'q'])
+        >>> a * b
+        q^3*t^4 + q*t^3 - 2*q^2*t - 2
+        >>> b * a
+        q^3*t^4 + q*t^3 - 2*q^2*t - 2
+        >>> a + b
+        q*t^3 + q^2*t - 1
+        >>> a * b == b * a
+        True
+        >>> a + b == b + a
+        True
         """
         if self.vars is other.vars:
             return self, other
 
-        def lcm(a, b):
-            return a * b // _gcd(a, b)
-
-        self_by_name = {v.name: v for v in self.vars}
-        other_by_name = {v.name: v for v in other.vars}
-
-        union_list = []
-        for v in self.vars:
-            d = (
-                lcm(v.denominator, other_by_name[v.name].denominator)
-                if v.name in other_by_name
-                else v.denominator
-            )
-            union_list.append(LaurentVariable(v.name, d))
-        for v in other.vars:
-            if v.name not in self_by_name:
-                union_list.append(LaurentVariable(v.name, v.denominator))
-        union_vars = _intern_vars(tuple(union_list))
-
-        def expand(poly_obj):
-            old_vars = poly_obj.vars
-            name_to_old = {v.name: i for i, v in enumerate(old_vars)}
-            slots = []
-            for uv in union_vars:
-                oi = name_to_old.get(uv.name)
-                if oi is not None:
-                    slots.append((oi, uv.denominator // old_vars[oi].denominator))
-                else:
-                    slots.append(None)
-            new_dict = {}
-            for old_key, coeff in poly_obj.poly_dict.items():
-                new_key = []
-                for slot in slots:
-                    new_key.append(
-                        old_key[slot[0]] * slot[1] if slot is not None else 0
-                    )
-                new_dict[tuple(new_key)] = coeff
-            return FastDictLaurentPolynomial._make(union_vars, new_dict, _interned=True)
-
-        return expand(self), expand(other)
+        union_vars = _union_vars(self.vars, other.vars)
+        return (
+            FastDictLaurentPolynomial._make(
+                union_vars, _expand_dict_to(self, union_vars), _interned=True
+            ),
+            FastDictLaurentPolynomial._make(
+                union_vars, _expand_dict_to(other, union_vars), _interned=True
+            ),
+        )
 
     def __add__(self, other):
         lhs, rhs = (
