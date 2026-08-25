@@ -1,3 +1,6 @@
+from dict_laurent_polynomial import FastDictLaurentPolynomial, DictLaurentPolynomial
+
+
 class _ShapeOnly:
     """Stand-in for a tensor when only its shape matters (opt_einsum input)."""
 
@@ -508,5 +511,9 @@ class RTNetwork:
         result = prefactor
         for tensor, _ in reduced.network:
             result *= tensor[()]
-        result = result.to_checked().simplify_variables()
+
+        if isinstance(reduced, FastDictLaurentPolynomial) and not isinstance(
+            DictLaurentPolynomial
+        ):
+            result = result.to_checked().simplify_variables()
         return (result, time)
