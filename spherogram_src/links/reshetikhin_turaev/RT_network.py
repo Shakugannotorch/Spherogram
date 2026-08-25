@@ -1,4 +1,4 @@
-from dict_laurent_polynomial import FastDictLaurentPolynomial, DictLaurentPolynomial
+from .dict_laurent_polynomial import FastDictLaurentPolynomial, DictLaurentPolynomial
 
 
 class _ShapeOnly:
