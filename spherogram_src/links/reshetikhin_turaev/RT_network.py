@@ -508,4 +508,5 @@ class RTNetwork:
         result = prefactor
         for tensor, _ in reduced.network:
             result *= tensor[()]
+        result = result.to_checked()
         return (result, time)

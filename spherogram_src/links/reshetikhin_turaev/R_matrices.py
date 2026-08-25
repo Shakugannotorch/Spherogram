@@ -112,6 +112,39 @@ class RMatrix:
     def from_directory(
         dir_path, vars=["t", "q"], compressed=False, sage_polynomials=False
     ):
+        """
+        Build an RMatrix from four CSV files:
+            Rp.csv: the R tensor for a positive crossing
+            Rn.csv: the R tensor for a negative crossing
+            hp.csv: the h tensor for a positive rotation number
+            hn.csv: the h tensor for a negative rotation number
+        stored under `dir_path`. See Example 2.4 in 
+        `[Li26] <https://arxiv.org/abs/2606.29662>`_ for the conventions.
+
+        If `compressed` is True, the files are expected to be compressed with 
+        bzip2 and have a ".bz2" suffix.
+
+        The CSV files should be of two columns: the first column is a tuple of 
+        integers representing the exponent tuple of a tensor entry, and the 
+        second column is a string representation of a Laurent polynomial in the 
+        variables `vars`. The CSV files should have a header row with the 
+        shape of the tensor and the coefficient ring (currently only "ZZ" is 
+        supported). For example, the following is the content of hp.csv for the
+        1-colored Links--Gould polynomial::
+
+            "(4,4)","ZZ"
+            "(0,0)","1"
+            "(1,1)","-1"
+            "(2,2)","-1"
+            "(3,3)","1"
+
+        vars: variable names, in the order the exponent tuples use them.
+
+        If `sage_polynomials` is True, the entries of RMatrix would be Sage's 
+        LaurentPolynomials or PuiseuxSeries instead of 
+        FastDictLaurentPolynomial values.  The latter is the default because it
+        uses much less RAM.
+        """
         names = [
             name + ".csv" + (".bz2" if compressed else "")
             for name in ["Rp", "Rn", "hp", "hn"]
