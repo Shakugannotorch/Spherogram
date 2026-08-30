@@ -512,8 +512,8 @@ class RTNetwork:
         for tensor, _ in reduced.network:
             result *= tensor[()]
 
-        if isinstance(reduced, FastDictLaurentPolynomial) and not isinstance(
-            reduced, DictLaurentPolynomial
+        if isinstance(result, FastDictLaurentPolynomial) and not isinstance(
+            result, DictLaurentPolynomial
         ):
             result = result.to_checked().simplify_variables()
         return (result, time)
