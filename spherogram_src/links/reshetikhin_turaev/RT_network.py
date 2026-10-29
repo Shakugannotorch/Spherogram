@@ -433,7 +433,7 @@ class RTNetwork:
 
         for indices in seq:
             if verbose:
-                print(f"contracting {indices} for {self.network}")
+                print(f"contracting {indices} for {[item[1] for item in self.network]}")
 
             self.contract_nodes(indices)
 
