@@ -313,7 +313,11 @@ class RTNetwork:
 
         return ans, abstract_network
 
-    def contraction_sequence(self, omit_idle_arcs=True, method='auto'):
+    def contraction_sequence(self, omit_idle_arcs=True, method="auto"):
+        """
+        Method for debugging purpose. Returns the contraction sequence found by
+        optimal_contraction_sequence in terms of indices contracted at each step.
+        """
         abstract_network = []
         for _, key in self.network:
             if omit_idle_arcs:
@@ -421,14 +425,20 @@ class RTNetwork:
                 i += 1
         return ans
 
-    def contract_sequence(self, seq, timed=False):
+    def contract_sequence(self, seq, timed=False, verbose=False):
         if timed:
             import time
 
             start_time = time.time()
 
         for indices in seq:
+            if verbose:
+                print(f"contracting {indices} for {self.network}")
+
             self.contract_nodes(indices)
+
+        if verbose:
+            print(f"All seq contracted.")
 
         if timed:
             time_cost = time.time() - start_time
@@ -460,16 +470,24 @@ class RTNetwork:
             (tensor.permute(reshape_indices, consume=True), tuple(desired_order))
         )
 
-    def contract_all(self, timed=False, method="auto"):
+    def contract_all(self, timed=False, method="auto", verbose=False):
         """
         Perform all possible contractions on self.
 
         Return modified self and time (None if not timed).
         """
         self._resolve_self_loops()
-        time = self.contract_sequence(
-            self.optimal_contraction_sequence(method=method), timed=timed
-        )
+
+        if verbose:
+            print("Finding contraction sequence...")
+
+        seq = self.optimal_contraction_sequence(method=method)
+
+        if verbose:
+            (w, m), _ = self.seq_contraction_width(seq)
+            print(f"Contraction sequence found with width {w} and multiplicity {m}")
+
+        time = self.contract_sequence(seq, timed=timed, verbose=verbose)
 
         assert len(self.network) == 1
 
@@ -477,10 +495,11 @@ class RTNetwork:
 
         return (self, time)
 
-    def evaluate(self, timed=False, method="auto"):
+    def evaluate(self, timed=False, method="auto", verbose=False):
         """
-        Fixate all idle labels at value 0, obtaining a new RTNework with (0,0) boundary (without modifying self),
-        contract_all on the new RTNetwork and return the product of all values of the resulting tensors.
+        Fixate all idle labels at value 0, obtaining a new RTNework with (0,0)
+        boundary (without modifying self), contract_all on the new RTNetwork
+        and return the product of all values of the resulting tensors.
         """
         assert self.boundary == (1, 1)
 
@@ -508,7 +527,7 @@ class RTNetwork:
             boundary=(0, 0),
             boundary_labels=[],
         )
-        time = reduced.contract_all(timed=timed, method=method)[1]
+        time = reduced.contract_all(timed=timed, method=method, verbose=verbose)[1]
 
         result = prefactor
         for tensor, _ in reduced.network:
