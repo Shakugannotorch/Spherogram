@@ -1400,7 +1400,7 @@ class Link:
         
         return Tangle((1,1), L.crossings, open_strands)
 
-    def min_long_diagram(self, method='auto'):
+    def min_long_diagram(self, method='auto', cap=None):
         """
         Return the long diagram of self with the minimal contraction width
         """
@@ -1410,7 +1410,10 @@ class Link:
         
         min_width = None
 
-        for i in range(len(self.crossings)):
+        if cap is None:
+            cap = len(self.crossings)
+
+        for i in range(min(cap, len(self.crossings))):
             entry_indices = [3, 0] if self.crossings[i].sign == 1 else [0, 1]
             for j in entry_indices:
                 diagram = self.long_diagram(cut_at=(i,j))
@@ -1419,7 +1422,7 @@ class Link:
                     ans = diagram
                     min_width = width
 
-        return ans  
+        return ans
 
     def __len__(self):
         return len(self.crossings)
