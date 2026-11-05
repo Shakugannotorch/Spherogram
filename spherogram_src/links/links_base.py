@@ -1412,6 +1412,8 @@ class Link:
 
         if cap is None:
             cap = len(self.crossings)
+        elif cap < 1:
+            raise ValueError("cap must be a positive integer")
 
         for i in range(min(cap, len(self.crossings))):
             entry_indices = [3, 0] if self.crossings[i].sign == 1 else [0, 1]
